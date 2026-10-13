@@ -12,7 +12,8 @@ var builder = WebApplication.CreateBuilder(args);
 // QuestPDF is free under the Community license; declare it once before any PDF is generated.
 QuestPDF.Settings.License = QuestPDF.Infrastructure.LicenseType.Community;
 
-builder.WebHost.UseUrls("http://127.0.0.1:5099");
+var listenUrls = Environment.GetEnvironmentVariable("LOVEDOWNLOAD_URLS");
+builder.WebHost.UseUrls(string.IsNullOrWhiteSpace(listenUrls) ? "http://127.0.0.1:5099" : listenUrls);
 
 Directory.CreateDirectory(RepoPaths.DataDirectory);
 Directory.CreateDirectory(RepoPaths.DownloadsDirectory);
