@@ -11,6 +11,7 @@ public sealed class DownloadWorker : BackgroundService
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IDownloadEngine _engine;
     private readonly JobControlRegistry _registry;
+    private readonly ScheduleStore _scheduleStore;
     private readonly ILogger<DownloadWorker> _logger;
 
     public DownloadWorker(
@@ -18,12 +19,14 @@ public sealed class DownloadWorker : BackgroundService
         IServiceScopeFactory scopeFactory,
         IDownloadEngine engine,
         JobControlRegistry registry,
+        ScheduleStore scheduleStore,
         ILogger<DownloadWorker> logger)
     {
         _queue = queue;
         _scopeFactory = scopeFactory;
         _engine = engine;
         _registry = registry;
+        _scheduleStore = scheduleStore;
         _logger = logger;
     }
 
@@ -61,6 +64,16 @@ public sealed class DownloadWorker : BackgroundService
             var job = await db.Jobs.FirstOrDefaultAsync(x => x.Id == jobId, ct);
             if (job is null || job.Status == DownloadStatus.Completed || job.Status == DownloadStatus.Paused)
             {
+                return;
+            }
+
+            var setting = await _scheduleStore.GetAsync(ct);
+            if (setting.Enabled &&
+                !ScheduleWindow.IsOpen(setting.StartMinutes, setting.EndMinutes, DateTimeOffset.Now.TimeOfDay))
+            {
+                job.Status = DownloadStatus.Scheduled;
+                job.UpdatedAt = DateTimeOffset.UtcNow;
+                await db.SaveChangesAsync(ct);
                 return;
             }
 

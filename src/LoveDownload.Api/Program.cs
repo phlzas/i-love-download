@@ -18,6 +18,7 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 
 builder.Services.AddSingleton<DownloadQueue>();
 builder.Services.AddSingleton<JobControlRegistry>();
+builder.Services.AddSingleton<ScheduleStore>();
 
 var engineOptions = new EngineOptions();
 builder.Configuration.GetSection("Engine").Bind(engineOptions);
@@ -29,6 +30,7 @@ builder.Services
         client.Timeout = TimeSpan.FromMinutes(5);
     });
 builder.Services.AddHostedService<DownloadWorker>();
+builder.Services.AddHostedService<DownloadScheduler>();
 
 builder.Services
     .AddControllers()
@@ -41,6 +43,16 @@ using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
     db.Database.EnsureCreated();
+
+    // EnsureCreated does not add tables to a pre-existing database, so upgrade a stale
+    // schema in place. Keep the DDL in sync with ScheduleSetting / AppDbContext.
+    db.Database.ExecuteSqlRaw(
+        "CREATE TABLE IF NOT EXISTS \"ScheduleSettings\" (" +
+        "\"Id\" INTEGER NOT NULL CONSTRAINT \"PK_ScheduleSettings\" PRIMARY KEY AUTOINCREMENT," +
+        "\"Enabled\" INTEGER NOT NULL," +
+        "\"StartMinutes\" INTEGER NOT NULL," +
+        "\"EndMinutes\" INTEGER NOT NULL," +
+        "\"UpdatedAt\" INTEGER NOT NULL);");
 }
 
 app.MapControllers();

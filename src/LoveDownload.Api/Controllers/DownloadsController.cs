@@ -13,12 +13,14 @@ public sealed class DownloadsController : ControllerBase
     private readonly AppDbContext _db;
     private readonly DownloadQueue _queue;
     private readonly JobControlRegistry _registry;
+    private readonly ScheduleStore _scheduleStore;
 
-    public DownloadsController(AppDbContext db, DownloadQueue queue, JobControlRegistry registry)
+    public DownloadsController(AppDbContext db, DownloadQueue queue, JobControlRegistry registry, ScheduleStore scheduleStore)
     {
         _db = db;
         _queue = queue;
         _registry = registry;
+        _scheduleStore = scheduleStore;
     }
 
     public sealed record CreateDownloadRequest(string? Url);
@@ -31,19 +33,27 @@ public sealed class DownloadsController : ControllerBase
             return BadRequest(new { error = "url must be a non-empty absolute http or https URL" });
         }
 
+        var setting = await _scheduleStore.GetAsync(ct);
+        var windowClosed = setting.Enabled &&
+            !ScheduleWindow.IsOpen(setting.StartMinutes, setting.EndMinutes, DateTimeOffset.Now.TimeOfDay);
+
         var now = DateTimeOffset.UtcNow;
         var job = new DownloadJob
         {
             Id = Guid.NewGuid(),
             Url = normalizedUrl!,
-            Status = DownloadStatus.Queued,
+            Status = windowClosed ? DownloadStatus.Scheduled : DownloadStatus.Queued,
             CreatedAt = now,
             UpdatedAt = now
         };
 
         _db.Jobs.Add(job);
         await _db.SaveChangesAsync(ct);
-        await _queue.EnqueueAsync(job.Id, ct);
+
+        if (job.Status == DownloadStatus.Queued)
+        {
+            await _queue.EnqueueAsync(job.Id, ct);
+        }
 
         return CreatedAtAction(nameof(GetById), new { id = job.Id }, job);
     }
