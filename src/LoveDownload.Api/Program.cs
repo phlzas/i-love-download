@@ -25,6 +25,8 @@ builder.Services.AddSingleton<DownloadQueue>();
 builder.Services.AddSingleton<JobControlRegistry>();
 builder.Services.AddSingleton<ScheduleStore>();
 builder.Services.AddSingleton<PdfReportService>();
+builder.Services.AddSingleton<IProbeCache, SqliteProbeCache>();
+builder.Services.AddSingleton<IInterfaceSpeedProvider, SqliteInterfaceSpeedProvider>();
 
 var engineOptions = new EngineOptions();
 builder.Configuration.GetSection("Engine").Bind(engineOptions);
@@ -85,6 +87,20 @@ using (var scope = app.Services.CreateScope())
     db.Database.ExecuteSqlRaw(
         "CREATE UNIQUE INDEX IF NOT EXISTS \"IX_SegmentStats_JobId_ChunkIndex\" " +
         "ON \"SegmentStats\" (\"JobId\", \"ChunkIndex\");");
+
+    db.Database.ExecuteSqlRaw(
+        "CREATE TABLE IF NOT EXISTS \"ProbeCache\" (" +
+        "\"Url\" TEXT NOT NULL CONSTRAINT \"PK_ProbeCache\" PRIMARY KEY," +
+        "\"RangeSupported\" INTEGER NOT NULL," +
+        "\"Length\" INTEGER NULL," +
+        "\"FileName\" TEXT NULL," +
+        "\"FetchedAt\" INTEGER NOT NULL);");
+
+    db.Database.ExecuteSqlRaw(
+        "CREATE TABLE IF NOT EXISTS \"InterfaceSpeed\" (" +
+        "\"InterfaceKey\" TEXT NOT NULL CONSTRAINT \"PK_InterfaceSpeed\" PRIMARY KEY," +
+        "\"BytesPerSecond\" REAL NOT NULL," +
+        "\"UpdatedAt\" INTEGER NOT NULL);");
 
     if (!HasColumn(db, "Jobs", "StartedAt"))
     {

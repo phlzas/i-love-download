@@ -20,12 +20,45 @@ public sealed class NetworkInterfaceSelector
     ];
 
     private readonly IReadOnlyList<NetworkInterfaceAddress> _addresses;
+    private readonly double[]? _credit;
+    private readonly double[]? _nodeWeights;
+    private readonly double _weightSum;
+    private readonly object _weightGate = new();
     private int _cursor = -1;
 
-    public NetworkInterfaceSelector(EngineOptions options)
+    /// <param name="weights">
+    /// Optional per-interface weights keyed by interface name. When null/empty (or no
+    /// positive weight is available) the selector keeps its original plain round-robin
+    /// behaviour; otherwise it performs smooth weighted round-robin.
+    /// </param>
+    public NetworkInterfaceSelector(EngineOptions options, IReadOnlyDictionary<string, double>? weights = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         _addresses = Discover(options);
+
+        if (weights is { Count: > 0 } && _addresses.Count > 0)
+        {
+            var nodeWeights = new double[_addresses.Count];
+            double sum = 0;
+            for (var i = 0; i < _addresses.Count; i++)
+            {
+                var weight = 1.0;
+                if (weights.TryGetValue(_addresses[i].InterfaceName, out var supplied) && supplied > 0)
+                {
+                    weight = supplied;
+                }
+
+                nodeWeights[i] = weight;
+                sum += weight;
+            }
+
+            if (sum > 0)
+            {
+                _credit = new double[_addresses.Count];
+                _nodeWeights = nodeWeights;
+                _weightSum = sum;
+            }
+        }
     }
 
     public IReadOnlyList<NetworkInterfaceAddress> Available => _addresses;
@@ -37,11 +70,35 @@ public sealed class NetworkInterfaceSelector
             return null;
         }
 
-        var slot = Interlocked.Increment(ref _cursor);
-        return _addresses[(int)((uint)slot % (uint)_addresses.Count)];
+        if (_credit is null || _nodeWeights is null)
+        {
+            // No usable weights: plain round-robin, byte-for-byte as before.
+            var slot = Interlocked.Increment(ref _cursor);
+            return _addresses[(int)((uint)slot % (uint)_addresses.Count)];
+        }
+
+        // Smooth weighted round-robin: every node accrues credit at its weight and the
+        // highest-credit node is handed out, then docked the total so credit stays bounded.
+        lock (_weightGate)
+        {
+            var best = 0;
+            var bestCredit = double.NegativeInfinity;
+            for (var i = 0; i < _addresses.Count; i++)
+            {
+                _credit[i] += _nodeWeights[i];
+                if (_credit[i] > bestCredit)
+                {
+                    bestCredit = _credit[i];
+                    best = i;
+                }
+            }
+
+            _credit[best] -= _weightSum;
+            return _addresses[best];
+        }
     }
 
-    private static IReadOnlyList<NetworkInterfaceAddress> Discover(EngineOptions options)
+    public static IReadOnlyList<NetworkInterfaceAddress> Discover(EngineOptions options)
     {
         var results = new List<NetworkInterfaceAddress>();
 

@@ -13,14 +13,22 @@ public sealed class ChunkedDownloadEngine : IDownloadEngine
     private readonly HttpClient _http;
     private readonly EngineOptions _options;
     private readonly SingleConnectionDownloadEngine _single;
+    private readonly IProbeCache? _probeCache;
+    private readonly IInterfaceSpeedProvider? _speedProvider;
     private readonly object _progressGate = new();
     private long _reportedBytes;
 
-    public ChunkedDownloadEngine(HttpClient http, EngineOptions options)
+    public ChunkedDownloadEngine(
+        HttpClient http,
+        EngineOptions options,
+        IProbeCache? probeCache = null,
+        IInterfaceSpeedProvider? speedProvider = null)
     {
         _http = http;
         _options = options;
         _single = new SingleConnectionDownloadEngine(http);
+        _probeCache = probeCache;
+        _speedProvider = speedProvider;
     }
 
     public async Task<DownloadOutcome> DownloadAsync(
@@ -50,6 +58,41 @@ public sealed class ChunkedDownloadEngine : IDownloadEngine
     }
 
     private async Task<ProbeResult> ProbeAsync(DownloadRequest request, CancellationToken ct)
+    {
+        if (_probeCache is not null)
+        {
+            try
+            {
+                var cached = await _probeCache.GetAsync(request.Url, ct).ConfigureAwait(false);
+                if (cached is { } hit)
+                {
+                    return hit;
+                }
+            }
+            catch
+            {
+                // Probe caching is best-effort; fall through to a live probe.
+            }
+        }
+
+        var result = await ProbeNetworkAsync(request, ct).ConfigureAwait(false);
+
+        if (_probeCache is not null)
+        {
+            try
+            {
+                await _probeCache.SetAsync(request.Url, result, ct).ConfigureAwait(false);
+            }
+            catch
+            {
+                // Persisting the probe is best-effort.
+            }
+        }
+
+        return result;
+    }
+
+    private async Task<ProbeResult> ProbeNetworkAsync(DownloadRequest request, CancellationToken ct)
     {
         long? length = null;
         var rangeSupported = false;
@@ -123,7 +166,7 @@ public sealed class ChunkedDownloadEngine : IDownloadEngine
         var maxConnections = Math.Max(1, _options.MaxConnections);
         var chunkCount = (int)Math.Min(int.MaxValue, (length + chunkSize - 1) / chunkSize);
 
-        var selector = new NetworkInterfaceSelector(_options);
+        var selector = await CreateSelectorAsync(ct).ConfigureAwait(false);
         var boundClients = new Dictionary<IPAddress, HttpClient>();
         var createdClients = new List<HttpClient>();
         var actualLocalIps = new ConcurrentDictionary<string, byte>(StringComparer.Ordinal);
@@ -265,6 +308,43 @@ public sealed class ChunkedDownloadEngine : IDownloadEngine
         }
     }
 
+    private async Task<NetworkInterfaceSelector> CreateSelectorAsync(CancellationToken ct)
+    {
+        IReadOnlyDictionary<string, double>? weights = null;
+
+        if (_speedProvider is not null)
+        {
+            try
+            {
+                var names = NetworkInterfaceSelector.Discover(_options)
+                    .Select(x => x.InterfaceName)
+                    .Distinct(StringComparer.OrdinalIgnoreCase);
+
+                var map = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+                foreach (var name in names)
+                {
+                    var weight = await _speedProvider.GetWeightAsync(name, ct).ConfigureAwait(false);
+                    if (weight > 0)
+                    {
+                        map[name] = weight;
+                    }
+                }
+
+                if (map.Count > 0)
+                {
+                    weights = map;
+                }
+            }
+            catch
+            {
+                // No usable speed memory: keep plain round-robin.
+                weights = null;
+            }
+        }
+
+        return new NetworkInterfaceSelector(_options, weights);
+    }
+
     private async Task RunChunkAsync(
         HttpClient client,
         string url,
@@ -352,6 +432,19 @@ public sealed class ChunkedDownloadEngine : IDownloadEngine
                     sw.ElapsedMilliseconds));
             }
             catch { /* stats must never break the download */ }
+
+            if (_speedProvider is not null && assigned is not null)
+            {
+                try
+                {
+                    await _speedProvider.RecordSegmentAsync(
+                        assigned.InterfaceName,
+                        written,
+                        sw.ElapsedMilliseconds,
+                        linked.Token).ConfigureAwait(false);
+                }
+                catch { /* speed memory must never break the download */ }
+            }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -507,6 +600,4 @@ public sealed class ChunkedDownloadEngine : IDownloadEngine
         {
         }
     }
-
-    private readonly record struct ProbeResult(bool RangeSupported, long? Length, string? FileName);
 }
