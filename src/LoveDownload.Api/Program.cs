@@ -17,8 +17,13 @@ builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseSqlite($"Data Source={RepoPaths.DatabasePath}"));
 
 builder.Services.AddSingleton<DownloadQueue>();
+
+var engineOptions = new EngineOptions();
+builder.Configuration.GetSection("Engine").Bind(engineOptions);
+builder.Services.AddSingleton(engineOptions);
+
 builder.Services
-    .AddHttpClient<IDownloadEngine, SingleConnectionDownloadEngine>(client =>
+    .AddHttpClient<IDownloadEngine, ChunkedDownloadEngine>(client =>
     {
         client.Timeout = TimeSpan.FromMinutes(5);
     });

@@ -6,4 +6,6 @@ public sealed record DownloadOutcome(
     string? FilePath,
     long BytesDownloaded,
     long? TotalBytes,
-    string? Error);
+    string? Error,
+    int ConnectionsUsed = 0,
+    string? InterfacesUsed = null);

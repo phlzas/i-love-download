@@ -9,6 +9,8 @@ public class DownloadJob
     public DownloadStatus Status { get; set; } = DownloadStatus.Queued;
     public long BytesDownloaded { get; set; }
     public long? TotalBytes { get; set; }
+    public int ConnectionsUsed { get; set; }
+    public string? InterfacesUsed { get; set; }
     public string? Error { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }

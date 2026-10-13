@@ -2,7 +2,7 @@
 
 A Windows desktop download manager that downloads a **single file across multiple network interfaces at once** — splitting it into byte-range chunks, sending each chunk over a different link (Ethernet + Wi‑Fi + phone tethering), then reassembling it. Pause/resume across restarts and time-window scheduling on top.
 
-> **Status: M2 — walking skeleton.** One URL → one job row in the DB → a file on disk, driven from a Tauri desktop window. Real multi-interface chunking is **M3** (in progress). See [Roadmap](#roadmap).
+> **Status: M3 — chunked engine.** One URL → one job row in the DB → a file on disk. The engine now probes for `Accept-Ranges`, splits Range-capable downloads into byte-range chunks sent in parallel over selected network interfaces, and reassembles them; anything else falls back to the single-connection path. See [Roadmap](#roadmap).
 
 ---
 
@@ -12,6 +12,15 @@ A Windows desktop download manager that downloads a **single file across multipl
 - `GET /downloads` / `GET /downloads/{id}` report live status + byte progress.
 - Unfinished jobs are re-queued automatically on restart.
 - A minimal Tauri v2 window lists the queue and polls the API every second.
+
+## What M3 adds
+
+- `ChunkedDownloadEngine` probes the URL (HEAD, then a ranged GET fallback) for `Content-Length` + `Accept-Ranges: bytes`.
+- When Range is supported and the length exceeds one chunk, `[0,len)` is split (default 4 MiB chunks, default 8 concurrent connections), the chunks download in parallel, and the parts are concatenated and verified against `Content-Length`.
+- Each chunk connection is bound to a usable network interface via `SocketsHttpHandler.ConnectCallback` + `Socket.Bind`; `NetworkInterfaceSelector` enumerates interfaces and assigns them round-robin.
+- Range-unsupported / unknown-length / single-chunk downloads fall back to `SingleConnectionDownloadEngine`.
+- Jobs expose `connectionsUsed` and `interfacesUsed`; tune via the `Engine` config section (`ChunkSizeBytes`, `MaxConnections`, `InterfaceAllowList`, `AddressFamily`).
+- Run `scripts/verify-m3.ps1` for the M3 integrity / fallback / interface-binding checks.
 
 ## Requirements
 
@@ -84,7 +93,7 @@ The .NET side owns **all** program logic; the Tauri shell only renders and calls
 | Milestone | Scope |
 |---|---|
 | **M2** ✅ | Walking skeleton: API + DB + worker + Tauri window, one file end-to-end |
-| **M3** 🚧 | Byte-range chunking + the multi-interface scheduler (the core idea), resume, scheduling, reporting, LLM, auth, caching — one concept at a time |
+| **M3** 🚧 | Byte-range chunking + multi-interface binding (core engine done: probe, parallel ranged chunks, interface round-robin, integrity check, single-connection fallback); resume, scheduling, reporting, LLM, auth, caching still ahead |
 | **M4** | Runnable by a stranger (single command), packaged |
 | **M5** | Submit (public repo + overview doc) |
 

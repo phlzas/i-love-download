@@ -77,6 +77,8 @@ public sealed class DownloadWorker : BackgroundService
                 job.FilePath = outcome.FilePath;
                 job.BytesDownloaded = outcome.BytesDownloaded;
                 job.TotalBytes = outcome.TotalBytes ?? outcome.BytesDownloaded;
+                job.ConnectionsUsed = outcome.ConnectionsUsed;
+                job.InterfacesUsed = outcome.InterfacesUsed;
                 job.Error = null;
             }
             else
