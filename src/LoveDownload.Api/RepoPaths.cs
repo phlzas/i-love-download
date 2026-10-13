@@ -11,6 +11,9 @@ public static class RepoPaths
 
     public static string DatabasePath => Path.Combine(DataDirectory, "lovedownload.db");
 
+    /// <summary>Separate SQLite file for the optional auth layer (Identity + tokens).</summary>
+    public static string AuthDatabasePath => Path.Combine(DataDirectory, "auth.db");
+
     private static string FindRoot()
     {
         string[] starts = [AppContext.BaseDirectory, Directory.GetCurrentDirectory()];
