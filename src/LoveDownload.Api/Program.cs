@@ -1,6 +1,7 @@
 using System.Text.Json.Serialization;
 using LoveDownload.Api;
 using LoveDownload.Api.Data;
+using LoveDownload.Api.Llm;
 using LoveDownload.Api.Models;
 using LoveDownload.Api.Reporting;
 using LoveDownload.Api.Services;
@@ -29,6 +30,14 @@ builder.Services.AddSingleton<PdfReportService>();
 var engineOptions = new EngineOptions();
 builder.Configuration.GetSection("Engine").Bind(engineOptions);
 builder.Services.AddSingleton(engineOptions);
+
+// LLM scheduling (concept 5): options come from the "Llm" section then LLM_* env vars; Enabled defaults to false.
+var llmOptions = LlmOptions.FromConfiguration(builder.Configuration);
+builder.Services.AddSingleton(llmOptions);
+builder.Services.AddSingleton<ILlmCostLogger, LlmCostLogger>();
+builder.Services.AddSingleton<PromptLoader>();
+builder.Services.AddSingleton<ScheduleNlParser>();
+builder.Services.AddHttpClient<ILlmClient, OpenAiCompatibleLlmClient>();
 
 builder.Services
     .AddHttpClient<IDownloadEngine, ChunkedDownloadEngine>(client =>

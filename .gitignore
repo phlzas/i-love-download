@@ -28,6 +28,7 @@ app/src-tauri/target/
 
 # Logs
 *.log
+/logs/
 
 # OS
 Thumbs.db
