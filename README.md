@@ -2,7 +2,7 @@
 
 A Windows desktop download manager that downloads a **single file across multiple network interfaces at once** — splitting it into byte-range chunks, sending each chunk over a different link (Ethernet + Wi‑Fi + phone tethering), then reassembling it. Pause/resume across restarts and time-window scheduling on top.
 
-> **Status: M2–M5 done.** The walking skeleton runs; the engine chunks Range-capable downloads across network interfaces; pause/resume survives a restart without re-downloading a byte; and a daily time window parks and auto-resumes jobs. Next up: PDF reporting, LLM scheduling, auth and caching. See the [Roadmap](#roadmap) and the overview/submission doc [`My 10x Solution - Omar Ahmed.md`](<My 10x Solution - Omar Ahmed.md>).
+> **Status: M2 done — M3 (concepts) in progress.** The walking skeleton runs, and the core concepts are landing one at a time: byte-range **chunking across multiple network interfaces**, **pause/resume across restarts**, and a **time-window scheduler** are in and verified — **3 of 7 concepts**. Ahead: PDF reporting, LLM scheduling, auth, caching, then M4 (runnable by a stranger) and M5 (submit). See the [Roadmap](#roadmap) and the overview/submission doc [`My 10x Solution - Omar Ahmed.md`](<My 10x Solution - Omar Ahmed.md>).
 
 ---
 
@@ -16,7 +16,7 @@ A Windows desktop download manager that downloads a **single file across multipl
 - A job killed mid-download is re-queued and auto-resumed on restart.
 - A minimal Tauri v2 window lists the queue and polls the API every second.
 
-## Chunked, multi-interface engine (M3)
+## Chunked, multi-interface engine
 
 - `ChunkedDownloadEngine` probes the URL (HEAD, then a ranged GET fallback) for `Content-Length` + `Accept-Ranges: bytes`.
 - When Range is supported and the length exceeds one chunk, `[0,len)` is split (default 4 MiB chunks, default 8 concurrent connections), the chunks download in parallel, and the parts are concatenated and verified against `Content-Length`.
@@ -24,13 +24,13 @@ A Windows desktop download manager that downloads a **single file across multipl
 - Range-unsupported / unknown-length / single-chunk downloads fall back to `SingleConnectionDownloadEngine`.
 - Tune via the `Engine` config section (`ChunkSizeBytes`, `MaxConnections`, `InterfaceAllowList`, `AddressFamily`).
 
-## Pause / resume across restarts (M4)
+## Pause / resume across restarts
 
 - `POST /downloads/{id}/pause` sets the job to `Paused` and cancels its in-flight chunk connections; the half-written `.part` files are kept on disk.
 - `POST /downloads/{id}/resume` re-queues it; the engine reuses completed parts and resumes partial ones with a `Range` request, so no byte is downloaded twice.
 - On startup, `Downloading` jobs are re-queued (auto-resume) while `Paused` jobs stay paused. A job killed mid-download resumes to a byte-identical file.
 
-## Time-window scheduling (M5)
+## Time-window scheduling
 
 - A single persisted daily window: the `Schedule` config seeds a `ScheduleSetting` row that can be changed at runtime.
 - Semantics: `[start, end)` in **local time**; a `start` later than `end` wraps midnight; `start == end` means all day; **disabled means no gating**.
@@ -39,7 +39,7 @@ A Windows desktop download manager that downloads a **single file across multipl
 
 ## Verification
 
-Each milestone ships an end-to-end PowerShell verifier — it builds the solution, starts the API, drives it with `curl`, and asserts the results:
+Each concept ships an end-to-end PowerShell verifier — it builds the solution, starts the API, drives it with `curl`, and asserts the results:
 
 - `scripts/verify-m3.ps1` — chunking integrity, single-connection fallback, interface binding (16 checks).
 - `scripts/verify-m4.ps1` — pause / resume / restart recovery, byte-exact resume (34 checks).
@@ -134,21 +134,31 @@ The .NET side owns **all** program logic; the Tauri shell only renders and calls
 
 ## Roadmap
 
-The brief lists the milestones as *one-pager → walking skeleton → concepts, one at a time → runnable by a stranger → submit*; the "concepts" step is expanded below into one milestone per concept.
+Milestones follow the brief (one-pager §8): **M1 one-pager → M2 walking skeleton → M3 concepts, one at a time → M4 runnable by a stranger → M5 package & submit.**
 
 | Milestone | Scope | Status |
 |---|---|---|
 | **M1** | One-pager: problem, who, 10x claim, the 7 concepts, non-goal | ✅ |
-| **M2** | Walking skeleton: API + DB + worker + Tauri window, one file end-to-end | ✅ |
-| **M3** | Byte-range chunking across multiple network interfaces (+ single-connection fallback) | ✅ |
-| **M4** | Pause / resume across app restarts (state in the DB, partial chunks reused) | ✅ |
-| **M5** | Time-window scheduler (daily window; parks and auto-resumes jobs) | ✅ |
-| **M6** | Per-job PDF report (bytes, per-link speed, elapsed, time saved) | ⬜ |
-| **M7** | Natural-language scheduling (LLM → validated schedule JSON) | ⬜ |
-| **M8** | Local authentication protecting the API | ⬜ |
-| **M9** | Probe / speed caching | ⬜ |
-| **M10** | Tauri dashboard: live per-link speed chart | ⬜ |
-| **M11** | Runnable by a stranger + submit (exact README, packaged, public link) | ⬜ |
+| **M2** | Walking skeleton: API + DB + worker + desktop window, one URL end-to-end to a file on disk | ✅ |
+| **M3** | Concepts, one at a time — see the checklist below | 🚧 |
+| **M4** | Runnable by a stranger: exact README steps, seed/demo data, a written 5-minute demo path | ⬜ |
+| **M5** | Package & submit: finish the overview doc, tick the requirements, paste the public repo link | ⬜ |
+
+**M3 — concept checklist** (one-pager §4 / §6):
+
+| # | Concept | Where it lives | Status |
+|---|---|---|---|
+| 1 | API endpoints | `src/LoveDownload.Api/Controllers/` | ✅ |
+| 2 | Database (jobs, schedules) | EF Core + SQLite — `Data/`, `Models/` | ✅ |
+| 3 | Background / cron jobs (scheduler) | engine chunk workers + `Services/DownloadScheduler.cs` | ✅ |
+| 4 | Reporting — PDF | *(planned)* `Reporting/PdfReportService.cs` | ⬜ |
+| 5 | LLM scheduling | *(planned)* reuses the A17 LLM layer | ⬜ |
+| 6 | Authentication | *(planned)* reuses the BE-03 auth | ⬜ |
+| 7 | Caching (probe / speed) | *(planned)* `ProbeCache.cs` | ⬜ |
+
+Core features: ① add URL → chunked parallel ✅ · ② bind chunks to interfaces, reassemble + verify ✅ · ③ pause / resume across restart ✅ · ④ schedule a start time / window ✅ · ⑤ live per-link dashboard + PDF report ⬜.
+
+> *The git history labels each concept commit with its own number — `feat(m3)` chunking, `feat(m4)` pause/resume, `feat(m5)` scheduler — all of which sit inside the brief's **M3**. The verifier filenames (`scripts/verify-m3/m4/m5.ps1`) follow those internal labels.*
 
 ## Non-goals
 
