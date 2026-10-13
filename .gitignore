@@ -1,6 +1,6 @@
 # Runtime data — never commit
-downloads/
-data/
+/downloads/
+/data/
 *.db
 *.db-shm
 *.db-wal
