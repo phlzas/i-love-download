@@ -5,5 +5,6 @@ public interface IDownloadEngine
     Task<DownloadOutcome> DownloadAsync(
         DownloadRequest request,
         IProgress<DownloadProgress>? progress,
-        CancellationToken ct);
+        CancellationToken ct,
+        IProgress<SegmentSample>? segments = null);
 }

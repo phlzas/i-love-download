@@ -80,6 +80,7 @@ public sealed class DownloadWorker : BackgroundService
             job.Status = DownloadStatus.Downloading;
             job.Error = null;
             job.UpdatedAt = DateTimeOffset.UtcNow;
+            job.StartedAt ??= DateTimeOffset.UtcNow;
             await db.SaveChangesAsync(ct);
 
             var request = new DownloadRequest
@@ -89,7 +90,17 @@ public sealed class DownloadWorker : BackgroundService
                 DestinationRoot = RepoPaths.DownloadsDirectory
             };
 
-            var outcome = await _engine.DownloadAsync(request, new ThrottledProgress(db, job), linkedCts.Token);
+            var collector = new SegmentStatsCollector();
+
+            DownloadOutcome outcome;
+            try
+            {
+                outcome = await _engine.DownloadAsync(request, new ThrottledProgress(db, job), linkedCts.Token, collector);
+            }
+            finally
+            {
+                await TryPersistSegmentStatsAsync(db, job.Id, collector.Snapshot(), _logger);
+            }
 
             if (outcome.Success)
             {
@@ -101,6 +112,7 @@ public sealed class DownloadWorker : BackgroundService
                 job.ConnectionsUsed = outcome.ConnectionsUsed;
                 job.InterfacesUsed = outcome.InterfacesUsed;
                 job.Error = null;
+                job.CompletedAt = DateTimeOffset.UtcNow;
             }
             else
             {
@@ -169,6 +181,55 @@ public sealed class DownloadWorker : BackgroundService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Could not persist failure for job {JobId}", jobId);
+        }
+    }
+
+    private static async Task TryPersistSegmentStatsAsync(AppDbContext db, Guid jobId, IReadOnlyList<SegmentSample> samples, ILogger logger)
+    {
+        if (samples.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            var existing = await db.SegmentStats
+                .Where(x => x.JobId == jobId)
+                .ToDictionaryAsync(x => x.ChunkIndex);
+            foreach (var s in samples)
+            {
+                if (existing.TryGetValue(s.ChunkIndex, out var row))
+                {
+                    row.InterfaceName = s.InterfaceName;
+                    row.LocalAddress = s.LocalAddress;
+                    row.Start = s.Start;
+                    row.End = s.End;
+                    row.BytesWritten = s.BytesWritten;
+                    row.ElapsedMs = s.ElapsedMs;
+                    row.CreatedAt = DateTimeOffset.UtcNow;
+                }
+                else
+                {
+                    db.SegmentStats.Add(new DownloadSegmentStat
+                    {
+                        JobId = jobId,
+                        ChunkIndex = s.ChunkIndex,
+                        InterfaceName = s.InterfaceName,
+                        LocalAddress = s.LocalAddress,
+                        Start = s.Start,
+                        End = s.End,
+                        BytesWritten = s.BytesWritten,
+                        ElapsedMs = s.ElapsedMs,
+                        CreatedAt = DateTimeOffset.UtcNow
+                    });
+                }
+            }
+
+            await db.SaveChangesAsync();
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Could not persist segment stats for job {JobId}", jobId);
         }
     }
 }

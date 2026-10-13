@@ -26,17 +26,18 @@ public sealed class ChunkedDownloadEngine : IDownloadEngine
     public async Task<DownloadOutcome> DownloadAsync(
         DownloadRequest request,
         IProgress<DownloadProgress>? progress,
-        CancellationToken ct)
+        CancellationToken ct,
+        IProgress<SegmentSample>? segments = null)
     {
         try
         {
             var probe = await ProbeAsync(request, ct).ConfigureAwait(false);
             if (!probe.RangeSupported || probe.Length is not long length || length <= 0 || length <= _options.ChunkSizeBytes)
             {
-                return await _single.DownloadAsync(request, progress, ct).ConfigureAwait(false);
+                return await _single.DownloadAsync(request, progress, ct, segments).ConfigureAwait(false);
             }
 
-            return await DownloadChunkedAsync(request, length, probe.FileName, progress, ct).ConfigureAwait(false);
+            return await DownloadChunkedAsync(request, length, probe.FileName, progress, segments, ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -110,6 +111,7 @@ public sealed class ChunkedDownloadEngine : IDownloadEngine
         long length,
         string? fileName,
         IProgress<DownloadProgress>? progress,
+        IProgress<SegmentSample>? segments,
         CancellationToken ct)
     {
         var resolvedName = fileName ?? request.JobId.ToString("D");
@@ -198,7 +200,7 @@ public sealed class ChunkedDownloadEngine : IDownloadEngine
                 var assigned = selector.Next();
                 var client = ResolveClient(assigned, boundClients, createdClients, actualLocalIps);
 
-                tasks.Add(RunChunkAsync(client, request.Url, start, end, appendFrom[index], partPath, length, progress, gate, errors, linked, ct));
+                tasks.Add(RunChunkAsync(client, request.Url, index, assigned, start, end, appendFrom[index], partPath, length, progress, segments, gate, errors, linked, ct));
             }
 
             try
@@ -266,12 +268,15 @@ public sealed class ChunkedDownloadEngine : IDownloadEngine
     private async Task RunChunkAsync(
         HttpClient client,
         string url,
+        int chunkIndex,
+        NetworkInterfaceAddress? assigned,
         long start,
         long end,
         long appendFrom,
         string partPath,
         long totalLength,
         IProgress<DownloadProgress>? progress,
+        IProgress<SegmentSample>? segments,
         SemaphoreSlim gate,
         ConcurrentQueue<Exception> errors,
         CancellationTokenSource linked,
@@ -296,6 +301,7 @@ public sealed class ChunkedDownloadEngine : IDownloadEngine
 
             var expected = end - requestStart + 1;
             long written = 0;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
 
             await using (var source = await response.Content.ReadAsStreamAsync(linked.Token).ConfigureAwait(false))
             await using (var destination = new FileStream(
@@ -327,11 +333,25 @@ public sealed class ChunkedDownloadEngine : IDownloadEngine
                     ArrayPool<byte>.Shared.Return(buffer);
                 }
             }
+            sw.Stop();
 
             if (written != expected)
             {
                 throw new InvalidDataException($"Range {requestStart}-{end} produced {written} bytes, expected {expected}.");
             }
+
+            try
+            {
+                segments?.Report(new SegmentSample(
+                    chunkIndex,
+                    assigned?.InterfaceName,
+                    assigned?.Address?.ToString(),
+                    requestStart,
+                    end,
+                    written,
+                    sw.ElapsedMilliseconds));
+            }
+            catch { /* stats must never break the download */ }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

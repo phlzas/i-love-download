@@ -13,7 +13,8 @@ public sealed class SingleConnectionDownloadEngine : IDownloadEngine
     public async Task<DownloadOutcome> DownloadAsync(
         DownloadRequest request,
         IProgress<DownloadProgress>? progress,
-        CancellationToken ct)
+        CancellationToken ct,
+        IProgress<SegmentSample>? segments = null)
     {
         try
         {

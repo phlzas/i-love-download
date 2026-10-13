@@ -1,5 +1,6 @@
 using LoveDownload.Api.Data;
 using LoveDownload.Api.Models;
+using LoveDownload.Api.Reporting;
 using LoveDownload.Api.Services;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -14,13 +15,15 @@ public sealed class DownloadsController : ControllerBase
     private readonly DownloadQueue _queue;
     private readonly JobControlRegistry _registry;
     private readonly ScheduleStore _scheduleStore;
+    private readonly PdfReportService _reportService;
 
-    public DownloadsController(AppDbContext db, DownloadQueue queue, JobControlRegistry registry, ScheduleStore scheduleStore)
+    public DownloadsController(AppDbContext db, DownloadQueue queue, JobControlRegistry registry, ScheduleStore scheduleStore, PdfReportService reportService)
     {
         _db = db;
         _queue = queue;
         _registry = registry;
         _scheduleStore = scheduleStore;
+        _reportService = reportService;
     }
 
     public sealed record CreateDownloadRequest(string? Url);
@@ -78,6 +81,93 @@ public sealed class DownloadsController : ControllerBase
         }
 
         return Ok(job);
+    }
+
+    [HttpGet("{id:guid}/stats")]
+    public async Task<IActionResult> Stats(Guid id, CancellationToken ct)
+    {
+        var job = await _db.Jobs.AsNoTracking().FirstOrDefaultAsync(x => x.Id == id, ct);
+        if (job is null)
+        {
+            return NotFound(new { error = $"download '{id}' was not found" });
+        }
+
+        var segments = await _db.SegmentStats
+            .AsNoTracking()
+            .Where(x => x.JobId == id)
+            .OrderBy(x => x.ChunkIndex)
+            .ToListAsync(ct);
+
+        var segmentViews = segments.Select(s => new
+        {
+            chunkIndex = s.ChunkIndex,
+            start = s.Start,
+            end = s.End,
+            bytesWritten = s.BytesWritten,
+            elapsedMs = s.ElapsedMs,
+            interfaceName = s.InterfaceName,
+            localAddress = s.LocalAddress,
+            bytesPerSecond = s.ElapsedMs > 0 ? (double)s.BytesWritten / (s.ElapsedMs / 1000.0) : (double?)null
+        }).ToList();
+
+        var interfaces = segments
+            .GroupBy(s => new { s.InterfaceName, s.LocalAddress })
+            .Select(grp =>
+            {
+                var bytes = grp.Sum(x => x.BytesWritten);
+                var elapsed = grp.Sum(x => x.ElapsedMs);
+                return new
+                {
+                    interfaceName = grp.Key.InterfaceName,
+                    localAddress = grp.Key.LocalAddress,
+                    chunkCount = grp.Count(),
+                    bytes,
+                    elapsedMs = elapsed,
+                    bytesPerSecond = elapsed > 0 ? (double)bytes / (elapsed / 1000.0) : (double?)null
+                };
+            })
+            .OrderByDescending(x => x.bytes)
+            .ToList();
+
+        var totalBytes = segments.Sum(s => s.BytesWritten);
+        var totalElapsed = segments.Sum(s => s.ElapsedMs);
+
+        return Ok(new
+        {
+            jobId = id,
+            totalBytes,
+            completedBytes = job.BytesDownloaded,
+            elapsedMs = totalElapsed,
+            bytesPerSecond = totalElapsed > 0 ? (double)totalBytes / (totalElapsed / 1000.0) : (double?)null,
+            startedAt = job.StartedAt,
+            completedAt = job.CompletedAt,
+            interfaces,
+            segments = segmentViews
+        });
+    }
+
+    [HttpGet("{id:guid}/report")]
+    public async Task<IActionResult> Report(Guid id, CancellationToken ct)
+    {
+        var job = await _db.Jobs.AsNoTracking().FirstOrDefaultAsync(x => x.Id == id, ct);
+        if (job is null)
+        {
+            return NotFound(new { error = $"download '{id}' was not found" });
+        }
+
+        if (job.Status != DownloadStatus.Completed)
+        {
+            return Conflict(new { error = $"download '{id}' is not completed" });
+        }
+
+        var segments = await _db.SegmentStats
+            .AsNoTracking()
+            .Where(x => x.JobId == id)
+            .OrderBy(x => x.ChunkIndex)
+            .ToListAsync(ct);
+
+        var pdf = _reportService.Build(job, segments);
+        return File(pdf, "application/pdf", $"report-{id}.pdf");
     }
 
     [HttpPost("{id:guid}/pause")]
