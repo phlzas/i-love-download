@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>I Love Download</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+
+  <body>
+    <div class="app">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 3v10" />
+              <path d="m7 10 5 5 5-5" />
+              <path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
+            </svg>
+          </span>
+          <div class="brand-text">
+            <h1>I Love Download</h1>
+            <p class="brand-eyebrow">Local download queue</p>
+          </div>
+        </div>
+
+        <div class="conn" id="conn" data-state="unknown">
+          <span class="conn-dot" aria-hidden="true"></span>
+          <span class="conn-label" id="conn-label">Connecting</span>
+        </div>
+      </header>
+
+      <form class="composer" id="composer" autocomplete="off" novalidate>
+        <label class="field">
+          <span class="field-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.72" />
+              <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+            </svg>
+          </span>
+          <input
+            id="url"
+            type="text"
+            inputmode="url"
+            spellcheck="false"
+            placeholder="Paste a link to download"
+            aria-label="Download URL"
+          />
+        </label>
+        <button type="submit" class="btn-primary" id="download-btn">
+          <span class="btn-label">Download</span>
+          <svg class="btn-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 4v13" />
+            <path d="m6 12 6 6 6-6" />
+          </svg>
+        </button>
+      </form>
+
+      <div class="banner" id="banner" role="alert" hidden>
+        <svg class="banner-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="m10.29 3.86-8 14A1 1 0 0 0 3 19h18a1 1 0 0 0 .86-1.5l-8-14a1 1 0 0 0-1.72 0Z" />
+          <path d="M12 9v4" />
+          <path d="M12 17h.01" />
+        </svg>
+        <span class="banner-text" id="banner-text"></span>
+      </div>
+
+      <section class="queue" aria-label="Download queue">
+        <div class="queue-head">
+          <h2 class="queue-title">Queue</h2>
+          <span class="queue-count" id="queue-count">—</span>
+        </div>
+
+        <div class="job-list" id="job-list" hidden></div>
+
+        <div class="empty" id="empty">
+          <span class="empty-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 3v10" />
+              <path d="m7 10 5 5 5-5" />
+              <path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
+            </svg>
+          </span>
+          <p class="empty-title">Nothing queued yet</p>
+          <p class="empty-sub">Paste a link above to start a download.</p>
+        </div>
+      </section>
+    </div>
+  </body>
+</html>

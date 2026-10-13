@@ -1,0 +1,34 @@
+# Runtime data — never commit
+downloads/
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# Secrets
+.env
+*.env
+!.env.example
+
+# .NET
+bin/
+obj/
+*.user
+*.suo
+
+# Node / frontend
+node_modules/
+dist/
+dist-ssr/
+.vite/
+
+# Rust / Tauri
+target/
+app/src-tauri/target/
+
+# Logs
+*.log
+
+# OS
+Thumbs.db
+.DS_Store

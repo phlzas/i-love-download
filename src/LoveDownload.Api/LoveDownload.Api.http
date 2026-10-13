@@ -1,0 +1,13 @@
+@LoveDownload.Api_HostAddress = http://127.0.0.1:5099
+
+POST {{LoveDownload.Api_HostAddress}}/downloads
+Content-Type: application/json
+
+{ "url": "https://proof.ovh.net/files/1Mb.dat" }
+
+###
+
+GET {{LoveDownload.Api_HostAddress}}/downloads
+Accept: application/json
+
+###
