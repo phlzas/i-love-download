@@ -10,17 +10,20 @@ public sealed class DownloadWorker : BackgroundService
     private readonly DownloadQueue _queue;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IDownloadEngine _engine;
+    private readonly JobControlRegistry _registry;
     private readonly ILogger<DownloadWorker> _logger;
 
     public DownloadWorker(
         DownloadQueue queue,
         IServiceScopeFactory scopeFactory,
         IDownloadEngine engine,
+        JobControlRegistry registry,
         ILogger<DownloadWorker> logger)
     {
         _queue = queue;
         _scopeFactory = scopeFactory;
         _engine = engine;
+        _registry = registry;
         _logger = logger;
     }
 
@@ -45,13 +48,18 @@ public sealed class DownloadWorker : BackgroundService
 
     private async Task ProcessAsync(Guid jobId, CancellationToken ct)
     {
+        // Register before the status check so a pause arriving after it still cancels
+        // this token rather than racing past the check.
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        _registry.Register(jobId, linkedCts);
+
         try
         {
             using var scope = _scopeFactory.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
 
             var job = await db.Jobs.FirstOrDefaultAsync(x => x.Id == jobId, ct);
-            if (job is null || job.Status == DownloadStatus.Completed)
+            if (job is null || job.Status == DownloadStatus.Completed || job.Status == DownloadStatus.Paused)
             {
                 return;
             }
@@ -68,7 +76,7 @@ public sealed class DownloadWorker : BackgroundService
                 DestinationRoot = RepoPaths.DownloadsDirectory
             };
 
-            var outcome = await _engine.DownloadAsync(request, new ThrottledProgress(db, job), ct);
+            var outcome = await _engine.DownloadAsync(request, new ThrottledProgress(db, job), linkedCts.Token);
 
             if (outcome.Success)
             {
@@ -90,14 +98,43 @@ public sealed class DownloadWorker : BackgroundService
             job.UpdatedAt = DateTimeOffset.UtcNow;
             await db.SaveChangesAsync(ct);
         }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        catch (OperationCanceledException) when (linkedCts.IsCancellationRequested)
         {
-            // Cancelled during shutdown; job stays Downloading for restart.
+            // Pause persists Paused and shutdown leaves Downloading; both are the
+            // intended terminal state for this run, so writing Failed here would corrupt it.
+            var status = await ReadStatusAsync(jobId);
+            _logger.LogDebug(
+                "Download job {JobId} cancelled with persisted status {Status}",
+                jobId,
+                status?.ToString() ?? "unknown");
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Download job {JobId} failed", jobId);
             await TryMarkFailedAsync(jobId, ex.Message);
+        }
+        finally
+        {
+            _registry.Unregister(jobId);
+        }
+    }
+
+    private async Task<DownloadStatus?> ReadStatusAsync(Guid jobId)
+    {
+        try
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            return await db.Jobs
+                .AsNoTracking()
+                .Where(x => x.Id == jobId)
+                .Select(x => (DownloadStatus?)x.Status)
+                .FirstOrDefaultAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not read status for job {JobId}", jobId);
+            return null;
         }
     }
 

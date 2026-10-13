@@ -12,11 +12,13 @@ public sealed class DownloadsController : ControllerBase
 {
     private readonly AppDbContext _db;
     private readonly DownloadQueue _queue;
+    private readonly JobControlRegistry _registry;
 
-    public DownloadsController(AppDbContext db, DownloadQueue queue)
+    public DownloadsController(AppDbContext db, DownloadQueue queue, JobControlRegistry registry)
     {
         _db = db;
         _queue = queue;
+        _registry = registry;
     }
 
     public sealed record CreateDownloadRequest(string? Url);
@@ -64,6 +66,51 @@ public sealed class DownloadsController : ControllerBase
         {
             return NotFound(new { error = $"download '{id}' was not found" });
         }
+
+        return Ok(job);
+    }
+
+    [HttpPost("{id:guid}/pause")]
+    public async Task<IActionResult> Pause(Guid id, CancellationToken ct)
+    {
+        var job = await _db.Jobs.FirstOrDefaultAsync(x => x.Id == id, ct);
+        if (job is null)
+        {
+            return NotFound(new { error = $"download '{id}' was not found" });
+        }
+
+        if (job.Status == DownloadStatus.Completed || job.Status == DownloadStatus.Failed)
+        {
+            return Conflict(new { error = "download cannot be paused in its current state" });
+        }
+
+        job.Status = DownloadStatus.Paused;
+        job.UpdatedAt = DateTimeOffset.UtcNow;
+        await _db.SaveChangesAsync(ct);
+        _registry.TryCancel(id);
+
+        return Ok(job);
+    }
+
+    [HttpPost("{id:guid}/resume")]
+    public async Task<IActionResult> Resume(Guid id, CancellationToken ct)
+    {
+        var job = await _db.Jobs.FirstOrDefaultAsync(x => x.Id == id, ct);
+        if (job is null)
+        {
+            return NotFound(new { error = $"download '{id}' was not found" });
+        }
+
+        if (job.Status != DownloadStatus.Paused)
+        {
+            return Conflict(new { error = "download is not paused" });
+        }
+
+        job.Status = DownloadStatus.Queued;
+        job.Error = null;
+        job.UpdatedAt = DateTimeOffset.UtcNow;
+        await _db.SaveChangesAsync(ct);
+        await _queue.EnqueueAsync(id, ct);
 
         return Ok(job);
     }

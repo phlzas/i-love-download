@@ -17,6 +17,7 @@ builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseSqlite($"Data Source={RepoPaths.DatabasePath}"));
 
 builder.Services.AddSingleton<DownloadQueue>();
+builder.Services.AddSingleton<JobControlRegistry>();
 
 var engineOptions = new EngineOptions();
 builder.Configuration.GetSection("Engine").Bind(engineOptions);
@@ -49,12 +50,27 @@ using (var scope = app.Services.CreateScope())
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
     var queue = app.Services.GetRequiredService<DownloadQueue>();
 
-    var unfinished = db.Jobs
-        .Where(x => x.Status == DownloadStatus.Queued || x.Status == DownloadStatus.Downloading)
+    var interrupted = db.Jobs
+        .Where(x => x.Status == DownloadStatus.Downloading)
+        .ToList();
+
+    foreach (var job in interrupted)
+    {
+        job.Status = DownloadStatus.Queued;
+        job.UpdatedAt = DateTimeOffset.UtcNow;
+    }
+
+    if (interrupted.Count > 0)
+    {
+        db.SaveChanges();
+    }
+
+    var queued = db.Jobs
+        .Where(x => x.Status == DownloadStatus.Queued)
         .Select(x => x.Id)
         .ToList();
 
-    foreach (var jobId in unfinished)
+    foreach (var jobId in queued)
     {
         queue.Enqueue(jobId);
     }

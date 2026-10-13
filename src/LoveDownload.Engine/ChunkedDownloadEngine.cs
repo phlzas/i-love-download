@@ -112,8 +112,6 @@ public sealed class ChunkedDownloadEngine : IDownloadEngine
         IProgress<DownloadProgress>? progress,
         CancellationToken ct)
     {
-        Interlocked.Exchange(ref _reportedBytes, 0);
-
         var resolvedName = fileName ?? request.JobId.ToString("D");
         var jobDirectory = Path.Combine(request.DestinationRoot, request.JobId.ToString("D"));
         Directory.CreateDirectory(jobDirectory);
@@ -129,6 +127,56 @@ public sealed class ChunkedDownloadEngine : IDownloadEngine
         var actualLocalIps = new ConcurrentDictionary<string, byte>(StringComparer.Ordinal);
         var errors = new ConcurrentQueue<Exception>();
         var partPaths = new string[chunkCount];
+        var appendFrom = new long[chunkCount];
+        var needsDownload = new bool[chunkCount];
+
+        // Inspect any existing part files so a paused/interrupted run resumes from
+        // what is already on disk instead of starting over.
+        // Seed the progress counter with the bytes already present (complete + partial)
+        // so progress stays continuous across a resume and never moves backwards.
+        long existingBytes = 0;
+        for (var index = 0; index < chunkCount; index++)
+        {
+            var start = index * chunkSize;
+            var end = Math.Min(length - 1, start + chunkSize - 1);
+            var expected = end - start + 1;
+            var partPath = Path.Combine(jobDirectory, $"{resolvedName}.{index:D5}.part");
+            partPaths[index] = partPath;
+
+            var existing = TryGetLength(partPath);
+            if (existing <= 0)
+            {
+                // Missing or empty: download the whole chunk fresh.
+                appendFrom[index] = 0;
+                needsDownload[index] = true;
+            }
+            else if (existing < expected)
+            {
+                // Partial: resume only the missing tail and append to what exists.
+                appendFrom[index] = existing;
+                existingBytes += existing;
+                needsDownload[index] = true;
+            }
+            else if (existing == expected)
+            {
+                // Already complete: reuse as-is, count its bytes as already downloaded.
+                existingBytes += existing;
+                needsDownload[index] = false;
+            }
+            else
+            {
+                // Corrupt (longer than expected): discard and re-download the whole chunk.
+                TryDelete(partPath);
+                appendFrom[index] = 0;
+                needsDownload[index] = true;
+            }
+        }
+
+        Interlocked.Exchange(ref _reportedBytes, existingBytes);
+        lock (_progressGate)
+        {
+            progress?.Report(new DownloadProgress(existingBytes, length));
+        }
 
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
         using var gate = new SemaphoreSlim(maxConnections);
@@ -138,15 +186,19 @@ public sealed class ChunkedDownloadEngine : IDownloadEngine
             var tasks = new List<Task>(chunkCount);
             for (var index = 0; index < chunkCount; index++)
             {
+                if (!needsDownload[index])
+                {
+                    continue;
+                }
+
                 var start = index * chunkSize;
                 var end = Math.Min(length - 1, start + chunkSize - 1);
-                var partPath = Path.Combine(jobDirectory, $"{resolvedName}.{index:D5}.part");
-                partPaths[index] = partPath;
+                var partPath = partPaths[index];
 
                 var assigned = selector.Next();
                 var client = ResolveClient(assigned, boundClients, createdClients, actualLocalIps);
 
-                tasks.Add(RunChunkAsync(client, request.Url, start, end, partPath, length, progress, gate, errors, linked, ct));
+                tasks.Add(RunChunkAsync(client, request.Url, start, end, appendFrom[index], partPath, length, progress, gate, errors, linked, ct));
             }
 
             try
@@ -193,6 +245,13 @@ public sealed class ChunkedDownloadEngine : IDownloadEngine
                 progress?.Report(new DownloadProgress(length, length));
             }
 
+            // Reassembly succeeded, so the part files are no longer needed. Parts are kept
+            // on cancel/failure so a subsequent run can resume from them.
+            foreach (var partPath in partPaths)
+            {
+                TryDelete(partPath);
+            }
+
             return new DownloadOutcome(true, resolvedName, filePath, length, length, null, chunkCount, DescribeInterfaces(selector, actualLocalIps));
         }
         finally
@@ -200,14 +259,6 @@ public sealed class ChunkedDownloadEngine : IDownloadEngine
             foreach (var client in createdClients)
             {
                 client.Dispose();
-            }
-
-            foreach (var partPath in partPaths)
-            {
-                if (!string.IsNullOrEmpty(partPath))
-                {
-                    TryDelete(partPath);
-                }
             }
         }
     }
@@ -217,6 +268,7 @@ public sealed class ChunkedDownloadEngine : IDownloadEngine
         string url,
         long start,
         long end,
+        long appendFrom,
         string partPath,
         long totalLength,
         IProgress<DownloadProgress>? progress,
@@ -231,21 +283,28 @@ public sealed class ChunkedDownloadEngine : IDownloadEngine
             await gate.WaitAsync(linked.Token).ConfigureAwait(false);
             acquired = true;
 
+            var requestStart = start + appendFrom;
             using var request = new HttpRequestMessage(HttpMethod.Get, url);
-            request.Headers.Range = new RangeHeaderValue(start, end);
+            request.Headers.Range = new RangeHeaderValue(requestStart, end);
             using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, linked.Token).ConfigureAwait(false);
             response.EnsureSuccessStatusCode();
 
             if (response.StatusCode != HttpStatusCode.PartialContent)
             {
-                throw new InvalidDataException($"Range {start}-{end} was ignored (status {(int)response.StatusCode}).");
+                throw new InvalidDataException($"Range {requestStart}-{end} was ignored (status {(int)response.StatusCode}).");
             }
 
-            var expected = end - start + 1;
+            var expected = end - requestStart + 1;
             long written = 0;
 
             await using (var source = await response.Content.ReadAsStreamAsync(linked.Token).ConfigureAwait(false))
-            await using (var destination = new FileStream(partPath, FileMode.Create, FileAccess.Write, FileShare.None, BufferSize, useAsync: true))
+            await using (var destination = new FileStream(
+                partPath,
+                appendFrom > 0 ? FileMode.Append : FileMode.Create,
+                FileAccess.Write,
+                FileShare.None,
+                BufferSize,
+                useAsync: true))
             {
                 var buffer = ArrayPool<byte>.Shared.Rent(BufferSize);
                 try
@@ -271,7 +330,7 @@ public sealed class ChunkedDownloadEngine : IDownloadEngine
 
             if (written != expected)
             {
-                throw new InvalidDataException($"Range {start}-{end} produced {written} bytes, expected {expected}.");
+                throw new InvalidDataException($"Range {requestStart}-{end} produced {written} bytes, expected {expected}.");
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -397,6 +456,22 @@ public sealed class ChunkedDownloadEngine : IDownloadEngine
         }
 
         return false;
+    }
+
+    private static long TryGetLength(string path)
+    {
+        try
+        {
+            return File.Exists(path) ? new FileInfo(path).Length : 0;
+        }
+        catch (IOException)
+        {
+            return 0;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return 0;
+        }
     }
 
     private static void TryDelete(string path)
