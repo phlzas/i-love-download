@@ -13,6 +13,8 @@ public class AppDbContext : DbContext
     public DbSet<DownloadJob> Jobs => Set<DownloadJob>();
     public DbSet<ScheduleSetting> ScheduleSettings => Set<ScheduleSetting>();
     public DbSet<DownloadSegmentStat> SegmentStats => Set<DownloadSegmentStat>();
+    public DbSet<ProbeCacheEntry> ProbeCacheEntries => Set<ProbeCacheEntry>();
+    public DbSet<InterfaceSpeed> InterfaceSpeeds => Set<InterfaceSpeed>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -44,5 +46,17 @@ public class AppDbContext : DbContext
         segment.HasKey(x => x.Id);
         segment.Property(x => x.CreatedAt).HasConversion(utcTicks);
         segment.HasIndex(x => new { x.JobId, x.ChunkIndex }).IsUnique();
+
+        var probe = modelBuilder.Entity<ProbeCacheEntry>();
+        probe.ToTable("ProbeCache");
+        probe.HasKey(x => x.Url);
+        probe.Property(x => x.Url).HasMaxLength(2048);
+        probe.Property(x => x.FetchedAt).HasConversion(utcTicks);
+
+        var speed = modelBuilder.Entity<InterfaceSpeed>();
+        speed.ToTable("InterfaceSpeed");
+        speed.HasKey(x => x.InterfaceKey);
+        speed.Property(x => x.InterfaceKey).HasMaxLength(256);
+        speed.Property(x => x.UpdatedAt).HasConversion(utcTicks);
     }
 }
