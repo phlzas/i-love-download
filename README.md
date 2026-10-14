@@ -2,7 +2,7 @@
 
 A Windows desktop download manager that downloads a **single file across multiple network interfaces at once** — splitting it into byte-range chunks, sending each chunk over a different link (Ethernet + Wi‑Fi + phone tethering), then reassembling it. Pause/resume across restarts and time-window scheduling on top.
 
-> **Status: M2 done — M3 (concepts) in progress.** The walking skeleton runs, and the core concepts are landing one at a time: byte-range **chunking across multiple network interfaces**, **pause/resume across restarts**, and a **time-window scheduler** are in and verified — **3 of 7 concepts**. Ahead: PDF reporting, LLM scheduling, auth, caching, then M4 (runnable by a stranger) and M5 (submit). See the [Roadmap](#roadmap) and the overview/submission doc [`My 10x Solution - Omar Ahmed.md`](<My 10x Solution - Omar Ahmed.md>).
+> **Status: all 7 concepts merged (M3 concepts complete).** The engine chunks a file across multiple network interfaces, resumes across restarts, and schedules inside a time window; on top of that the API now ships **per-job PDF reporting**, **natural-language scheduling**, **optional JWT auth**, and a **probe / interface-speed cache**. Next: the **live per-link dashboard** (core feature ⑤), then M4 (runnable by a stranger) and M5 (submit). See the [Roadmap](#roadmap) and the overview/submission doc [`My 10x Solution - Omar Ahmed.md`](<My 10x Solution - Omar Ahmed.md>).
 
 ---
 
@@ -14,7 +14,11 @@ A Windows desktop download manager that downloads a **single file across multipl
 - `POST /downloads/{id}/pause` / `/resume` stop and restart a download; a paused job and its partial chunks survive an app restart.
 - `GET` / `PUT /schedule` manage a daily time window — jobs only run inside it, parking as `Scheduled` and auto-resuming when it opens.
 - A job killed mid-download is re-queued and auto-resumed on restart.
-- A minimal Tauri v2 window lists the queue and polls the API every second.
+- `GET /downloads/{id}/report` renders a **per-job PDF** — bytes transferred, per-link average speed, elapsed time, and time saved vs. a single link.
+- `POST /schedule/parse` (and `/schedule/apply-nl`) turn a **natural-language** request — *"download tonight, prefer Ethernet, finish by 7 a.m."* — into a validated schedule window (an offline stub answers when no LLM is configured).
+- **Optional local auth** — `POST /auth/signup|login|refresh|logout` issue/rotate JWT access + refresh tokens and `/protected/*` routes require a Bearer token; off by default (`AUTH_ENABLED`), and when off every `/downloads` route is open.
+- URL probes and measured interface speeds are **cached**, so a resume or repeat job skips re-probing.
+- A Tauri v2 window lists the queue and polls the API every second — a **live per-link dashboard** (core feature ⑤) is the next UI step.
 
 ## Chunked, multi-interface engine
 
@@ -36,6 +40,31 @@ A Windows desktop download manager that downloads a **single file across multipl
 - Semantics: `[start, end)` in **local time**; a `start` later than `end` wraps midnight; `start == end` means all day; **disabled means no gating**.
 - A hosted `DownloadScheduler` ticks every second: when the window closes it parks running jobs as `Scheduled` (partial chunks kept) and when it opens it re-queues them; a job created outside the window starts as `Scheduled`.
 - `GET /schedule` returns the window plus `isOpen` / `nextOpenAt`; `PUT /schedule { "enabled", "start", "end" }` updates it live.
+
+## Reporting (per-job PDF)
+
+- `GET /downloads/{id}/report` builds a PDF with **QuestPDF** (`Reporting/PdfReportService.cs`): total bytes, per-interface average speed, elapsed time, and the time saved versus a single link.
+- Backed by the per-segment transfer stats captured for each chunk (`GET /downloads/{id}/stats`), so the report reflects what each interface actually moved.
+- Returns `409` if the job has not produced transfer stats yet, `404` for an unknown job.
+
+## Natural-language scheduling (LLM)
+
+- `POST /schedule/parse` turns a free-text request into a validated `{ enabled, start, end, explanation }` proposal **without** changing the stored schedule; `POST /schedule/apply-nl` validates and then applies it through the same store as `PUT /schedule`.
+- Reuses the A17 LLM layer (`Llm/ScheduleNlParser.cs`, `OpenAiCompatibleLlmClient.cs`) pointed at any OpenAI-compatible endpoint (e.g. local LM Studio). The response header `X-Schedule-Parse-Source` says whether the answer came from `llm` or the offline `stub`.
+- An **offline stub** answers deterministically when no LLM is configured, so the feature works with zero setup.
+- LLM calls are logged (tokens + cost) via `Llm/LlmCostLogger.cs`.
+
+## Caching (probe / interface speed)
+
+- URL probe results (`Content-Length`, `Accept-Ranges`, `ETag`) are cached in SQLite (`Services/SqliteProbeCache.cs`, `Models/ProbeCacheEntry.cs`) so a resume or repeat job skips the HEAD probe.
+- Measured per-interface speeds are cached and smoothed (`Services/SqliteInterfaceSpeedProvider.cs`, `Models/InterfaceSpeed.cs`) so the engine can bias chunk assignment without re-measuring every run.
+- Both are reached through the engine-facing interfaces `IProbeCache` / `IInterfaceSpeedProvider`.
+
+## Authentication (optional)
+
+- A port of BE-03: `POST /auth/signup` creates a local user, `POST /auth/login` issues JWT **access + refresh** tokens, `POST /auth/refresh` rotates them, `POST /auth/logout` revokes.
+- `GET /protected/profile|dashboard` require a valid Bearer token; `GET /protected/admin` additionally requires the `admin` role (`401` unauthenticated, `403` non-admin).
+- Controlled by `AUTH_ENABLED` (**off by default**). When off, the auth/protected routes are not mapped and the download API is anonymous; when on, the download routes require a token too. Auth state lives in a separate `data/auth.db`.
 
 ## Verification
 
@@ -99,6 +128,14 @@ Base URL `http://127.0.0.1:5099`. Errors are always `{ "error": "..." }`.
 | `POST` | `/downloads/{id}/resume` | `200` with the job (`Queued`) · `404` unknown · `409` if not `Paused` |
 | `GET` | `/schedule` | `200` with the window: `enabled`, `start`, `end`, `isOpen`, `nextOpenAt`, `now` |
 | `PUT` | `/schedule` | `200` with the updated window · `400` if `start`/`end` are not `HH:mm` (00:00–23:59) |
+| `POST` | `/schedule/parse` | `200` `{enabled,start,end,explanation}` + header `X-Schedule-Parse-Source` · `400`/`422` bad prompt · `503` LLM unavailable |
+| `POST` | `/schedule/apply-nl` | `200` with the updated window (same shape as `GET /schedule`) · as above |
+| `GET` | `/downloads/{id}/stats` | `200` with per-interface and per-chunk transfer stats (bytes, elapsed, bytes/s) |
+| `GET` | `/downloads/{id}/report` | `200` `application/pdf` per-job report · `404` unknown · `409` not ready |
+| `POST` | `/auth/signup` | `201` created user · `400` invalid *(mapped only when `AUTH_ENABLED`)* |
+| `POST` | `/auth/login` | `200` access + refresh tokens · `401` bad credentials *(mapped only when `AUTH_ENABLED`)* |
+
+> When `AUTH_ENABLED` is **false** (the default), the `/auth` and `/protected` routes are not mapped and all `/downloads` routes are anonymous. When it is **true**, every `/downloads` route requires a Bearer token (`401` otherwise).
 
 A job looks like:
 ```json
@@ -140,7 +177,7 @@ Milestones follow the brief (one-pager §8): **M1 one-pager → M2 walking skele
 |---|---|---|
 | **M1** | One-pager: problem, who, 10x claim, the 7 concepts, non-goal | ✅ |
 | **M2** | Walking skeleton: API + DB + worker + desktop window, one URL end-to-end to a file on disk | ✅ |
-| **M3** | Concepts, one at a time — see the checklist below | 🚧 |
+| **M3** | Concepts, one at a time — see the checklist below | ✅ (7/7) |
 | **M4** | Runnable by a stranger: exact README steps, seed/demo data, a written 5-minute demo path | ⬜ |
 | **M5** | Package & submit: finish the overview doc, tick the requirements, paste the public repo link | ⬜ |
 
@@ -151,12 +188,12 @@ Milestones follow the brief (one-pager §8): **M1 one-pager → M2 walking skele
 | 1 | API endpoints | `src/LoveDownload.Api/Controllers/` | ✅ |
 | 2 | Database (jobs, schedules) | EF Core + SQLite — `Data/`, `Models/` | ✅ |
 | 3 | Background / cron jobs (scheduler) | engine chunk workers + `Services/DownloadScheduler.cs` | ✅ |
-| 4 | Reporting — PDF | *(planned)* `Reporting/PdfReportService.cs` | ⬜ |
-| 5 | LLM scheduling | *(planned)* reuses the A17 LLM layer | ⬜ |
-| 6 | Authentication | *(planned)* reuses the BE-03 auth | ⬜ |
-| 7 | Caching (probe / speed) | *(planned)* `ProbeCache.cs` | ⬜ |
+| 4 | Reporting — PDF | `Reporting/PdfReportService.cs` + `GET /downloads/{id}/report` | ✅ |
+| 5 | LLM scheduling | `Llm/ScheduleNlParser.cs` + `POST /schedule/parse` · `/schedule/apply-nl` | ✅ |
+| 6 | Authentication | `Controllers/AuthController.cs`, `ProtectedController.cs` (reuses BE-03) | ✅ |
+| 7 | Caching (probe / speed) | `Services/SqliteProbeCache.cs`, `SqliteInterfaceSpeedProvider.cs` | ✅ |
 
-Core features: ① add URL → chunked parallel ✅ · ② bind chunks to interfaces, reassemble + verify ✅ · ③ pause / resume across restart ✅ · ④ schedule a start time / window ✅ · ⑤ live per-link dashboard + PDF report ⬜.
+Core features: ① add URL → chunked parallel ✅ · ② bind chunks to interfaces, reassemble + verify ✅ · ③ pause / resume across restart ✅ · ④ schedule a start time / window ✅ · ⑤ live per-link dashboard 🚧 + PDF report ✅.
 
 > *The git history labels each concept commit with its own number — `feat(m3)` chunking, `feat(m4)` pause/resume, `feat(m5)` scheduler — all of which sit inside the brief's **M3**. The verifier filenames (`scripts/verify-m3/m4/m5.ps1`) follow those internal labels.*
 
