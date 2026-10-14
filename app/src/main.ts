@@ -1,6 +1,7 @@
 const API_BASE = "http://127.0.0.1:5099";
 const POLL_MS = 1000;
 const REQUEST_TIMEOUT_MS = 4000;
+const TOKEN_STORAGE_KEY = "ild.access_token";
 
 type JobStatus = "Queued" | "Downloading" | "Completed" | "Failed";
 
@@ -49,14 +50,73 @@ const els = {
 const rows = new Map<string, RowRefs>();
 let polling = false;
 
+function getToken(): string | null {
+  try {
+    return localStorage.getItem(TOKEN_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function setToken(token: string | null): void {
+  try {
+    if (token) {
+      localStorage.setItem(TOKEN_STORAGE_KEY, token);
+    } else {
+      localStorage.removeItem(TOKEN_STORAGE_KEY);
+    }
+  } catch {
+    /* storage unavailable — auth stays off for this session */
+  }
+}
+
 async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  // Single choke point: attach the stored bearer token to every call. With no token
+  // (the default, AUTH_ENABLED=false) this is a no-op and the request is unchanged.
+  const headers = new Headers(init?.headers);
+  const token = getToken();
+  if (token) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
   try {
-    return await fetch(`${API_BASE}${path}`, { ...init, signal: controller.signal });
+    return await fetch(`${API_BASE}${path}`, { ...init, headers, signal: controller.signal });
   } finally {
     window.clearTimeout(timer);
   }
+}
+
+// Sign-in flow. Only ever triggered by a 401, so it is completely inert when the
+// API runs with AUTH_ENABLED=false (no 401 is ever returned).
+async function promptLogin(): Promise<boolean> {
+  const email = window.prompt("Sign in — email");
+  if (!email) return false;
+  const password = window.prompt("Sign in — password");
+  if (!password) return false;
+
+  try {
+    const res = await apiFetch("/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+    if (!res.ok) return false;
+    const data = (await res.json()) as { access_token?: string };
+    if (!data || typeof data.access_token !== "string") return false;
+    setToken(data.access_token);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Wraps apiFetch: on a 401, offer a login and retry the original request once.
+async function apiFetchWithReauth(path: string, init?: RequestInit): Promise<Response> {
+  const first = await apiFetch(path, init);
+  if (first.status !== 401) return first;
+  if (!(await promptLogin())) return first;
+  return apiFetch(path, init);
 }
 
 function formatBytes(bytes: number): string {
@@ -204,7 +264,7 @@ async function poll(): Promise<void> {
   if (polling) return;
   polling = true;
   try {
-    const res = await apiFetch("/downloads");
+    const res = await apiFetchWithReauth("/downloads");
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const jobs = (await res.json()) as Job[];
     setConnection("online");
@@ -232,7 +292,7 @@ els.form.addEventListener("submit", async (event) => {
   els.button.classList.add("is-busy");
 
   try {
-    const res = await apiFetch("/downloads", {
+    const res = await apiFetchWithReauth("/downloads", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ url }),
